@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-go-with-cb
+  namespace: test-01
+  labels:
+    app: cb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cb
+  template:
+    metadata:
+      labels:
+        app: cb
+    spec:
+      restartPolicy: Always
+      containers:
+      - name: client-go-with-cb
+        image: quay.io/polynomial/client-go-cb-poc:latest
