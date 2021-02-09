@@ -30,6 +30,7 @@ func main() {
 	config.QPS = 1
 	config.Burst = 1
 
+	config.TLSClientConfig.ServerName = "kubernetes.default.svc"
 	config.Wrap(newCustomTransport)
 
 	fmt.Println("creating the k8s client set for the config\n")
@@ -39,8 +40,8 @@ func main() {
 	}
 
 	for {
-		fmt.Println("about to LIST secrets in the default namespace")
-		ret, err := clientset.CoreV1().Secrets("default").List(context.TODO(), metav1.ListOptions{})
+		fmt.Println("about to LIST secrets in the test-01 namespace")
+		ret, err := clientset.CoreV1().Secrets("test-01").List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
 			fmt.Println(fmt.Sprintf("error while listing secrets, err = %v", err))
 		}
@@ -91,9 +92,9 @@ func (t *customTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // regardless of the implementation the service resolver should monitor /readyz and notify dependants (for example a load balancer)
 func resolveKubeAPIServers() []string {
 	return []string{
-		"10.0.133.106:6443",
-		"10.0.155.63:6443",
-		"10.0.168.81:6443",
+		"10.0.139.143:6443",
+		"10.0.153.114:6443",
+		"10.0.162.144:6443",
 	}
 }
 
