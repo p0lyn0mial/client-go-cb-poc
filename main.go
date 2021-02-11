@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"k8s.io/client-go/rest"
 	"math/rand"
 	"net/http"
 	"time"
@@ -31,7 +33,20 @@ func main() {
 	config.Burst = 1
 
 	config.TLSClientConfig.ServerName = "kubernetes.default.svc"
-	config.Wrap(newCustomTransport)
+
+	targetProvider := StaticTargetProvider{"10.0.138.69:6443", "10.0.145.116:6443", "10.0.164.186:6443"}
+	fmt.Println(fmt.Sprintf("creating and starting the health monitor for %v", targetProvider))
+	// TODO: copy the config and set a separate userAgent
+	hm, err := NewHealthMonitor(targetProvider, createConfigForHealthMonitor(config))
+	if err != nil {
+		panic(err)
+	}
+	go hm.StartMonitoring(context.TODO().Done())
+
+	config.Wrap(newCustomTransportWrapper(func() []string {
+		// TODO: provide an external thread safe way of getting healthy/unhealthy EPs
+		return hm.healthyTargets
+	}))
 
 	fmt.Println("creating the k8s client set for the config")
 	clientset, err := kubernetes.NewForConfig(config)
@@ -47,26 +62,54 @@ func main() {
 		}
 		fmt.Println(fmt.Sprintf("found %d secrets in the default namespace", len(ret.Items)))
 		fmt.Println("")
+		time.Sleep(35 * time.Second)
 	}
 }
 
-func newCustomTransport(rt http.RoundTripper) http.RoundTripper {
-	return &customTransport{baseRT: rt}
+func createConfigForHealthMonitor(restConfig *rest.Config) *rest.Config {
+	restConfigCopy := *restConfig
+	restConfigCopy.UserAgent = "HealthMonitor" // find a way that would help identify the client
+	restConfigCopy.TLSClientConfig.ServerName = "kubernetes.default.svc"
+
+	// doesn't matter since we are not using client-go only the TLS config
+	restConfigCopy.QPS = 1
+	restConfigCopy.Burst = 1
+
+	return &restConfigCopy
+}
+
+func newCustomTransportWrapper(resolveKubeAPIServersFn func() []string) func(http.RoundTripper) http.RoundTripper {
+	return func(rt http.RoundTripper) http.RoundTripper {
+		return &customTransport{
+			baseRT:                  rt,
+			resolveKubeAPIServersFn: resolveKubeAPIServersFn,
+		}
+	}
+
 }
 
 type customTransport struct {
-	baseRT http.RoundTripper
+	baseRT                  http.RoundTripper
+	resolveKubeAPIServersFn func() []string
 }
 
 func (t *customTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	fmt.Println(fmt.Sprintf("customTransport: RoundTrip: received a request for Method = %q to Host = %q, URL = %q", r.Method, r.Host, r.URL))
 
-	// TODO: needs proper implementation
-	kubeAPIServers := resolveKubeAPIServers()
+	// TODO: this should be replaced by calling the LB only
+	//       The LB should be notified about healthy/unhealthy targets and pick the best for the current request
+	//
+	// TODO: we need a way of waiting for the targets to become healthy
+	//
+	// TODO: if there are no healthy targets we could use the service IP - why not ?
+	//
+	kubeAPIServers := t.resolveKubeAPIServersFn()
+	if len(kubeAPIServers) == 0 {
+		return nil, errors.New("service unavailable")
+	}
 
 	// TODO: needs proper implementation
 	host := pickKubernetesServer(nil, kubeAPIServers)
-
 
 	// I don't like modifying the original request
 	r.Host = host
@@ -77,25 +120,6 @@ func (t *customTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// TODO: needs proper implementation
 	rt := getCircuitBreakerForEndpoint(host, t.baseRT)
 	return rt.RoundTrip(r)
-}
-
-// resolveKubeAPIServers knows how to get a list of IPs for Kubernetes API
-//
-// There are at least a few possible implementations
-//
-// 1: we get a static list from an operator via flags or config
-//
-// 2: we use a service IP to monitor endpoints for the default kubernetes service
-//
-// 3: we use a configmap that is automatically updated by kubelet
-//
-// regardless of the implementation the service resolver should monitor /readyz and notify dependants (for example a load balancer)
-func resolveKubeAPIServers() []string {
-	return []string{
-		"10.0.139.143:6443",
-		"10.0.153.114:6443",
-		"10.0.162.144:6443",
-	}
 }
 
 // pickKubernetesServer is a load balancer that picks a target
