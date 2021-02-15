@@ -34,7 +34,7 @@ func main() {
 
 	config.TLSClientConfig.ServerName = "kubernetes.default.svc"
 
-	targetProvider := StaticTargetProvider{"10.0.138.69:6443", "10.0.145.116:6443", "10.0.164.186:6443"}
+	targetProvider := StaticTargetProvider{"10.0.139.201:6443", "10.0.154.83:6443", "10.0.165.154:6443"}
 	fmt.Println(fmt.Sprintf("creating and starting the health monitor for %v", targetProvider))
 	// TODO: copy the config and set a separate userAgent
 	hm, err := NewHealthMonitor(targetProvider, createConfigForHealthMonitor(config))
@@ -44,8 +44,7 @@ func main() {
 	go hm.StartMonitoring(context.TODO().Done())
 
 	config.Wrap(newCustomTransportWrapper(func() []string {
-		// TODO: provide an external thread safe way of getting healthy/unhealthy EPs
-		return hm.healthyTargets
+		return hm.HealthyTargets()
 	}))
 
 	fmt.Println("creating the k8s client set for the config")
