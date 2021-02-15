@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"k8s.io/client-go/rest"
-	"math/rand"
 	"net/http"
 	"time"
 
@@ -43,9 +41,12 @@ func main() {
 	}
 	go hm.StartMonitoring(context.TODO().Done())
 
-	config.Wrap(newCustomTransportWrapper(func() []string {
-		return hm.HealthyTargets()
-	}))
+	loadBalancer, err := NewOxyRoundRobinLoadBalancer(hm)
+	if err != nil {
+		panic(err)
+	}
+
+	config.Wrap(newCustomTransportWrapper(loadBalancer))
 
 	fmt.Println("creating the k8s client set for the config")
 	clientset, err := kubernetes.NewForConfig(config)
@@ -77,61 +78,33 @@ func createConfigForHealthMonitor(restConfig *rest.Config) *rest.Config {
 	return &restConfigCopy
 }
 
-func newCustomTransportWrapper(resolveKubeAPIServersFn func() []string) func(http.RoundTripper) http.RoundTripper {
-	return func(rt http.RoundTripper) http.RoundTripper {
-		return &customTransport{
-			baseRT:                  rt,
-			resolveKubeAPIServersFn: resolveKubeAPIServersFn,
-		}
-	}
-
+func newCustomTransportWrapper(lb LoadBalancer) func(http.RoundTripper) http.RoundTripper {
+	return func(rt http.RoundTripper) http.RoundTripper { return &customTransport{baseRT: rt, lb: lb} }
 }
 
 type customTransport struct {
-	baseRT                  http.RoundTripper
-	resolveKubeAPIServersFn func() []string
+	baseRT http.RoundTripper
+	lb     LoadBalancer
 }
 
 func (t *customTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	fmt.Println(fmt.Sprintf("customTransport: RoundTrip: received a request for Method = %q to Host = %q, URL = %q", r.Method, r.Host, r.URL))
 
-	// TODO: this should be replaced by calling the LB only
-	//       The LB should be notified about healthy/unhealthy targets and pick the best for the current request
-	//
-	// TODO: we need a way of waiting for the targets to become healthy
-	//
 	// TODO: if there are no healthy targets we could use the service IP - why not ?
-	//
-	kubeAPIServers := t.resolveKubeAPIServersFn()
-	if len(kubeAPIServers) == 0 {
-		return nil, errors.New("service unavailable")
+	server, err := t.lb.NextServer()
+	if err != nil {
+		return nil, err
 	}
 
-	// TODO: needs proper implementation
-	host := pickKubernetesServer(nil, kubeAPIServers)
-
 	// I don't like modifying the original request
-	r.Host = host
-	r.URL.Host = host
+	r.Host = server
+	r.URL.Host = server
 
 	fmt.Println(fmt.Sprintf("customTransport: RoundTrip: The new Host is = %q", r.Host))
 
 	// TODO: needs proper implementation
-	rt := getCircuitBreakerForEndpoint(host, t.baseRT)
+	rt := getCircuitBreakerForEndpoint(server, t.baseRT)
 	return rt.RoundTrip(r)
-}
-
-// pickKubernetesServer is a load balancer that picks a target
-// for the current request, it could:
-//
-// - exclude already seen endpoints (servers) for the current request (support for retries)
-// - take into account weight of endpoints
-// - support an ep removal
-//     the service resolver could notify it when an ep fails /readyz
-//     the circuit breaker could notify it when a certain failure threshold has been reached
-//     the circuit breaker could notify when the weight of an ep decreased
-func pickKubernetesServer(seen []string, servers []string) string {
-	return servers[rand.Intn(len(servers))]
 }
 
 // getCircuitBreakerForEnpoint could map an endpoint (URL) to a circuit breaker aware endpoint
