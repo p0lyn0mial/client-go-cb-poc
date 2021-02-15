@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -44,6 +45,15 @@ type healthMonitor struct {
 
 	refreshTargetsLock sync.Mutex
 	refreshTargets     bool
+
+	// exportedHealthyTargets holds a copy of healthyTargets
+	exportedHealthyTargets atomic.Value
+
+	// exportedUnhealthyTargets holds a copy of unhealthyTargets
+	exportedUnhealthyTargets atomic.Value
+
+	// listeners holds a list of interested parties to be notified when the list of healthy targets changes
+	listeners []Listener
 }
 
 func NewHealthMonitor(targetProvider TargetProvider, restConfig *rest.Config) (*healthMonitor, error) {
@@ -54,7 +64,7 @@ func NewHealthMonitor(targetProvider TargetProvider, restConfig *rest.Config) (*
 		return nil, err
 	}
 
-	return &healthMonitor{
+	hm := &healthMonitor{
 		client:                   client,
 		targetProvider:           targetProvider,
 		targetsToMonitor:         targetProvider.CurrentTargetsList(),
@@ -65,7 +75,11 @@ func NewHealthMonitor(targetProvider TargetProvider, restConfig *rest.Config) (*
 
 		consecutiveSuccessfulProbes: map[string]int{},
 		consecutiveFailedProbes:     map[string][]error{},
-	}, nil
+	}
+	hm.exportedHealthyTargets.Store([]string{})
+	hm.exportedUnhealthyTargets.Store([]string{})
+
+	return hm, nil
 }
 
 // StartMonitoring starts monitoring the provided targets until stop channel is closed
@@ -84,6 +98,19 @@ func (sm *healthMonitor) Enqueue() {
 	sm.refreshTargetsLock.Lock()
 	defer sm.refreshTargetsLock.Unlock()
 	sm.refreshTargets = true
+}
+
+// Targets returns a list of healthy and unhealthy targets
+func (sm *healthMonitor) Targets() ([]string, []string) {
+	return sm.exportedHealthyTargets.Load().([]string), sm.exportedUnhealthyTargets.Load().([]string)
+}
+
+// AddListener adds a listener to be notified when the list of healthy targets changes
+//
+// Note:
+// this method is not thread safe and mustn't be called after calling StartMonitoring() method
+func (sm *healthMonitor) AddListener(listener Listener) {
+	sm.listeners = append(sm.listeners, listener)
 }
 
 type targetErrTuple struct {
@@ -190,15 +217,22 @@ func (sm *healthMonitor) updateHealthChecksFor(currentHealthCheckProbes []target
 
 	newUnhealthyTargetsSet := sets.NewString(newUnhealthyTargets...)
 	newHealthyTargetsSet := sets.NewString(newHealthyTargets...)
+	notifyListeners := false
 
 	// detect unhealthy targets
 	previouslyUnhealthyTargetsSet := sets.NewString(sm.unhealthyTargets...)
 	currentlyUnhealthyTargetsSet := previouslyUnhealthyTargetsSet.Union(newUnhealthyTargetsSet)
 	currentlyUnhealthyTargetsSet.Delete(newHealthyTargetsSet.List()...)
 	if !currentlyUnhealthyTargetsSet.Equal(previouslyUnhealthyTargetsSet) {
-		// TODO: notify about new unhealthy targets
 		sm.unhealthyTargets = currentlyUnhealthyTargetsSet.List()
 		klog.Infof("observed the following unhealthy targets %v", sm.unhealthyTargets)
+
+		exportedUnhealthyTargets := make([]string, len(sm.unhealthyTargets))
+		for index, unhealthyTarget := range sm.unhealthyTargets {
+			exportedUnhealthyTargets[index] = unhealthyTarget
+		}
+		sm.exportedUnhealthyTargets.Store(exportedUnhealthyTargets)
+		notifyListeners = true
 	}
 
 	// detect healthy targets
@@ -206,9 +240,22 @@ func (sm *healthMonitor) updateHealthChecksFor(currentHealthCheckProbes []target
 	currentlyHealthyTargetsSet := previouslyHealthyTargetsSet.Union(newHealthyTargetsSet)
 	currentlyHealthyTargetsSet.Delete(newUnhealthyTargetsSet.List()...)
 	if !currentlyHealthyTargetsSet.Equal(previouslyHealthyTargetsSet) {
-		// TODO: notify about new healthy servers
 		sm.healthyTargets = currentlyHealthyTargetsSet.List()
 		klog.Infof("observed the following healthy targets %v", sm.healthyTargets)
+
+		exportedHealthyTargets := make([]string, len(sm.healthyTargets))
+		for index, healthyTarget := range sm.healthyTargets {
+			exportedHealthyTargets[index] = healthyTarget
+		}
+		sm.exportedHealthyTargets.Store(exportedHealthyTargets)
+		notifyListeners = true
+	}
+
+	if notifyListeners {
+		// notify listeners about the new healthy/unhealthy targets
+		for _, listener := range sm.listeners {
+			listener.Enqueue()
+		}
 	}
 }
 

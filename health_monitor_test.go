@@ -14,14 +14,101 @@ func (sp fakeTargetProvider) CurrentTargetsList() []string {
 	return sp
 }
 
-func TestInternalStateAfterRefreshingTargets(t *testing.T) {
-	monitor := &healthMonitor{
-		unhealthyProbesThreshold: 2,
-		healthyProbesThreshold:   3,
+type fakeHealthyTargetListener struct {
+	called bool
+}
 
-		consecutiveSuccessfulProbes: map[string]int{},
-		consecutiveFailedProbes:     map[string][]error{},
+func (f *fakeHealthyTargetListener) Enqueue() {
+	f.called = true
+}
+
+func (f *fakeHealthyTargetListener) reset() {
+	f.called = false
+}
+
+func TestHealthyTargets(t *testing.T) {
+	fakeListener := &fakeHealthyTargetListener{}
+
+	target := newHealthMonitor()
+	target.AddListener(fakeListener)
+	target.unhealthyProbesThreshold = 1
+	target.healthyProbesThreshold = 1
+	target.targetsToMonitor = []string{"master-0", "master-1", "master-2"}
+
+	scenarios := []struct {
+		name                string
+		currentHealthProbes []targetErrTuple
+
+		expectedHealthyTargets   []string
+		expectedUnhealthyTargets []string
+		listenerNotified         bool
+	}{
+		{
+			name: "round 0: works with empty list",
+		},
+
+		{
+			name:                   "round 1: all servers passed probe, registered listener notified about healthy targets",
+			currentHealthProbes:    []targetErrTuple{createHealthyProbe("master-0"), createHealthyProbe("master-1"), createHealthyProbe("master-2")},
+			expectedHealthyTargets: []string{"master-0", "master-1", "master-2"},
+			listenerNotified:       true,
+		},
+
+		{
+			name:                     "round 2: master-1 becomes unhealthy, registered listener notified",
+			currentHealthProbes:      []targetErrTuple{createHealthyProbe("master-0"), createUnHealthyProbe("master-1"), createHealthyProbe("master-2")},
+			expectedHealthyTargets:   []string{"master-0", "master-2"},
+			expectedUnhealthyTargets: []string{"master-1"},
+			listenerNotified:         true,
+		},
+
+		{
+			name:                     "round 3: nothing changes, the listener is not notified",
+			currentHealthProbes:      []targetErrTuple{createHealthyProbe("master-0"), createUnHealthyProbe("master-1"), createHealthyProbe("master-2")},
+			expectedHealthyTargets:   []string{"master-0", "master-2"},
+			expectedUnhealthyTargets: []string{"master-1"},
+			listenerNotified:         false,
+		},
+
+		{
+			name:                     "round 4: master-2 becomes unhealthy, registered listener notified",
+			currentHealthProbes:      []targetErrTuple{createHealthyProbe("master-0"), createUnHealthyProbe("master-1"), createUnHealthyProbe("master-2")},
+			expectedHealthyTargets:   []string{"master-0"},
+			expectedUnhealthyTargets: []string{"master-1", "master-2"},
+			listenerNotified:         true,
+		},
+
+		{
+			name:                   "round 5: master-1 and master-2 becomes healthy, registered listener notified",
+			currentHealthProbes:    []targetErrTuple{createHealthyProbe("master-0"), createHealthyProbe("master-1"), createHealthyProbe("master-2")},
+			expectedHealthyTargets: []string{"master-0", "master-1", "master-2"},
+			listenerNotified: true,
+		},
 	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			// act
+			fakeListener.reset()
+			target.updateHealthChecksFor(scenario.currentHealthProbes)
+			actualHealthyTargets, actualUnhealthyTargets := target.Targets()
+
+			// validate
+			if !cmp.Equal(actualHealthyTargets, scenario.expectedHealthyTargets, cmpopts.EquateEmpty()) {
+				t.Errorf("unexpected list of healthy targets = %v, expected = %v", actualHealthyTargets, scenario.expectedHealthyTargets)
+			}
+			if !cmp.Equal(actualUnhealthyTargets, scenario.expectedUnhealthyTargets, cmpopts.EquateEmpty()) {
+				t.Errorf("unexpected list of unhealthy targets = %v, expected = %v", actualUnhealthyTargets, scenario.expectedUnhealthyTargets)
+			}
+			if fakeListener.called != scenario.listenerNotified {
+				t.Errorf("unexpected state of the registered listener, notified = %v, expected notified = %v", fakeListener.called, scenario.listenerNotified)
+			}
+		})
+	}
+}
+
+func TestInternalStateAfterRefreshingTargets(t *testing.T) {
+	monitor := newHealthMonitor()
 
 	scenarios := []struct {
 		name                 string
@@ -107,13 +194,7 @@ func TestInternalStateAfterRefreshingTargets(t *testing.T) {
 }
 
 func TestRefreshTargets(t *testing.T) {
-	monitor := &healthMonitor{
-		unhealthyProbesThreshold: 2,
-		healthyProbesThreshold:   3,
-
-		consecutiveSuccessfulProbes: map[string]int{},
-		consecutiveFailedProbes:     map[string][]error{},
-	}
+	monitor := newHealthMonitor()
 
 	scenarios := []struct {
 		name                 string
@@ -193,22 +274,8 @@ func TestRefreshTargets(t *testing.T) {
 }
 
 func TestHealthProbes(t *testing.T) {
-	target := &healthMonitor{
-		targetsToMonitor:         []string{"master-0", "master-1", "master-2"},
-		unhealthyProbesThreshold: 2,
-		healthyProbesThreshold:   3,
-
-		consecutiveSuccessfulProbes: map[string]int{},
-		consecutiveFailedProbes:     map[string][]error{},
-	}
-
-	createHealthyProbe := func(server string) targetErrTuple {
-		return targetErrTuple{server, nil}
-	}
-
-	createUnHealthyProbe := func(server string) targetErrTuple {
-		return targetErrTuple{server, errors.New("random error")}
-	}
+	target := newHealthMonitor()
+	target.targetsToMonitor = []string{"master-0", "master-1", "master-2"}
 
 	scenarios := []struct {
 		name                     string
@@ -286,4 +353,26 @@ func TestHealthProbes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newHealthMonitor() *healthMonitor {
+	hm := &healthMonitor{
+		unhealthyProbesThreshold: 2,
+		healthyProbesThreshold:   3,
+
+		consecutiveSuccessfulProbes: map[string]int{},
+		consecutiveFailedProbes:     map[string][]error{},
+	}
+	hm.exportedHealthyTargets.Store([]string{})
+	hm.exportedUnhealthyTargets.Store([]string{})
+
+	return hm
+}
+
+func createHealthyProbe(server string) targetErrTuple {
+	return targetErrTuple{server, nil}
+}
+
+func createUnHealthyProbe(server string) targetErrTuple {
+	return targetErrTuple{server, errors.New("random error")}
 }
