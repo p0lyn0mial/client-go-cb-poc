@@ -12,3 +12,7 @@ require (
 	k8s.io/client-go v0.20.0
 	k8s.io/klog/v2 v2.4.0
 )
+
+replace (
+	github.com/vulcand/oxy  => /Users/lszaszki/go/src/github.com/p0lyn0mial/oxy
+)
