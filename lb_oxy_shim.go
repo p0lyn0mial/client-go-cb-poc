@@ -3,41 +3,35 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net/url"
-
 	"github.com/vulcand/oxy/roundrobin"
+	"net/url"
 )
 
-type oxyRoundRobingShim struct {
+type OxyRoundRobingShim struct {
 	target *roundrobin.RoundRobin
-
-	hmp ServersHealthMonitorProvider
 }
 
-var _ LoadBalancer = &oxyRoundRobingShim{}
+var _ LoadBalancer = &OxyRoundRobingShim{}
 
 // NewOxyRoundRobinLoadBalancer is a shim for oxy's load balancer.
 // Oxy implementation provides a dynamic weighted round robin load balancer.
 //
 // This method returns an object that conforms to the interface we want.
-// And knows how to use the health monitor for getting the list of healthy/unhealthy servers.
-func NewOxyRoundRobinLoadBalancer(healthMonitorProvider ServersHealthMonitorProvider) (LoadBalancer, error) {
+func NewOxyRoundRobinLoadBalancer() (*OxyRoundRobingShim, error) {
 	oxyLB, err := roundrobin.New(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	lb := &oxyRoundRobingShim{
+	lb := &OxyRoundRobingShim{
 		target: oxyLB,
-		hmp: healthMonitorProvider,
 	}
-	lb.hmp.AddListener(lb)
 
 	return lb, nil
 }
 
 // NextServer simply returns the next healthy server for the current request
-func (lb *oxyRoundRobingShim) NextServer() (string, error) {
+func (lb *OxyRoundRobingShim) NextServer() (string, error) {
 	url, err := lb.target.NextServer()
 	if err != nil {
 		return "", err
@@ -48,11 +42,21 @@ func (lb *oxyRoundRobingShim) NextServer() (string, error) {
 	return url.Host, nil
 }
 
+// Servers returns all registered and healthy servers known by this LB
+func (lb *OxyRoundRobingShim) Servers() []string {
+	servers := lb.target.Servers()
+	ret := make([]string, 0, len(servers))
+
+	for _, server := range servers {
+		ret = append(ret, server.Host)
+	}
+
+	return ret
+}
+
 // This method is used by the HealthMonitor to notify that the list of targets has changed
 // TODO: I am going to rework this bit, leaving it for demonstration
-func (lb *oxyRoundRobingShim) Enqueue() {
-	healthyServers, unhealthyServers := lb.hmp.Targets()
-
+func (lb *OxyRoundRobingShim) Rebalance(healthyServers []string, unhealthyServers []string) {
 	// for now assume HTTPS scheme
 	toURLFn := func(server string) (*url.URL, error) {
 		return url.Parse(fmt.Sprintf("https://%v", server))
